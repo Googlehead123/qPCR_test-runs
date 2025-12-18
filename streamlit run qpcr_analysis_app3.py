@@ -236,7 +236,7 @@ class AnalysisEngine:
                     ref_delta_ct = ref_target['CT'].mean() - ref_hk['CT'].mean()
                 else:
                     ref_delta_ct = 0
-
+                
                 # ΔΔCt and relative expression
                 ddct = delta_ct - ref_delta_ct
                 rel_expr = 2 ** (-ddct)
@@ -423,7 +423,15 @@ class AnalysisEngine:
             return False
 
 # ==================== GRAPH GENERATOR ====================
+import textwrap
+
 class GraphGenerator:
+    @staticmethod
+    def _wrap_text(text: str, width: int = 15) -> str:
+        """Wrap text for x-axis labels"""
+        wrapped = textwrap.fill(text, width=width)
+        return wrapped
+    
     @staticmethod
     def create_gene_graph(
         data: pd.DataFrame,
@@ -445,10 +453,6 @@ class GraphGenerator:
         gene_data = data.copy()
         
         # Ensure we have required columns
-        required_cols = ['Condition', 'Relative_Expression', 'SEM']
-        missing = [col for col in required_cols if col not in gene_data.columns]
-        
-        # Try alternative column names
         if 'Relative_Expression' not in gene_data.columns:
             if 'Fold_Change' in gene_data.columns:
                 gene_data['Relative_Expression'] = gene_data['Fold_Change']
@@ -467,9 +471,11 @@ class GraphGenerator:
             mapping = st.session_state.get('sample_mapping', {})
             condition_order = []
             for sample in sample_order:
-                cond = mapping.get(sample, {}).get('condition', sample)
-                if cond in gene_data['Condition'].unique():
-                    condition_order.append(cond)
+                # Only include samples that are marked as 'include'
+                if mapping.get(sample, {}).get('include', True):
+                    cond = mapping.get(sample, {}).get('condition', sample)
+                    if cond in gene_data['Condition'].unique():
+                        condition_order.append(cond)
             
             # Add any conditions not in order (shouldn't happen, but safety)
             for cond in gene_data['Condition'].unique():
@@ -486,23 +492,28 @@ class GraphGenerator:
         else:
             # Fallback: sort by appearance order
             gene_data = gene_data.sort_values('Condition')
-            
-        # Get colors - Grey tones for controls, custom for treatments
-        # Check for per-sample custom colors first
+        
+        # Reset index to ensure proper sequential indexing
+        gene_data_indexed = gene_data.reset_index(drop=True)
+        
+        # Store condition names for labels
+        condition_names = gene_data_indexed['Condition'].tolist()
+        n_bars = len(gene_data_indexed)
+        
+        # Get colors - White/Medium Grey for controls, Grey base for treatments
         bar_colors = []
         
-        # Standard grey-tone palette for controls
         control_colors = {
-            'Baseline': '#E8E8E8',           # Very light grey (non-treated)
-            'Non-treated': '#E8E8E8',        # Very light grey
-            'Control': '#E8E8E8',            # Very light grey
-            'Negative Control': '#BDBDBD',   # Medium grey
-            'Inducer': '#BDBDBD',            # Medium grey (for α-MSH, IGF, etc)
-            'Positive Control': '#757575',   # Dark grey
-            'Treatment': None                # Will use custom color
+            'Baseline': '#FFFFFF',
+            'Non-treated': '#FFFFFF',
+            'Control': '#FFFFFF',
+            'Negative Control': '#9E9E9E',
+            'Inducer': '#9E9E9E',
+            'Positive Control': '#9E9E9E',
+            'Treatment': '#D3D3D3'
         }
         
-        for idx, row in gene_data.iterrows():
+        for idx, row in gene_data_indexed.iterrows():
             condition = row['Condition']
             group = row.get('Group', 'Treatment')
             
@@ -510,38 +521,57 @@ class GraphGenerator:
             custom_key = f"{gene}_{condition}"
             if custom_key in settings.get('bar_colors_per_sample', {}):
                 bar_colors.append(settings['bar_colors_per_sample'][custom_key])
-            # Use control grey tones
-            elif group in control_colors and control_colors[group] is not None:
+            elif group in control_colors:
                 bar_colors.append(control_colors[group])
-            # Use gene default color for treatments
             else:
-                default_color = settings.get('bar_colors', {}).get(gene, '#4ECDC4')
+                default_color = settings.get('bar_colors', {}).get(gene, '#D3D3D3')
                 bar_colors.append(default_color)
-                
-        # Get significance text
-        sig_text = gene_data.get('significance', [''] * len(gene_data))
         
         # Create figure
         fig = go.Figure()
         
         # Error bars
-        error_array = gene_data['SEM'] * settings.get('error_multiplier', 1.96)
+        error_array = (gene_data_indexed['SEM'] * settings.get('error_multiplier', 1.96)).values
         
-        # Add bar trace
+        # Per-bar settings for individual control
+        gene_bar_settings = st.session_state.get(f'{gene}_bar_settings', {})
+        
+        # Check global show/hide for this gene
+        show_error_global = settings.get('show_error', True)
+        show_sig_global = settings.get('show_significance', True)
+        
+        # Build error visibility array
+        error_visible_array = []
+        
+        for idx in range(n_bars):
+            row = gene_data_indexed.iloc[idx]
+            condition = row['Condition']
+            bar_key = f"{gene}_{condition}"
+            
+            # Get individual bar settings (default to True)
+            bar_config = gene_bar_settings.get(bar_key, {'show_sig': True, 'show_err': True})
+            
+            # ERROR BARS: Both global AND individual must be True
+            if show_error_global and bar_config.get('show_err', True):
+                error_visible_array.append(error_array[idx])
+            else:
+                error_visible_array.append(0)
+        
+        # Add bar trace with UPPER-ONLY error bars
+        # CRITICAL: Use numeric x-values (indices) for proper positioning
         fig.add_trace(go.Bar(
-            x=gene_data['Condition'],
-            y=gene_data['Relative_Expression'],
+            x=list(range(n_bars)),  # Use numeric indices 0, 1, 2, ... n_bars-1
+            y=gene_data_indexed['Relative_Expression'],
             error_y=dict(
                 type='data',
-                array=error_array,
-                visible=settings.get('show_error', True),
+                array=error_visible_array,
+                arrayminus=[0] * n_bars,  # NO LOWER ERROR BARS
+                visible=True,
                 thickness=2,
                 width=4,
-                color='rgba(0,0,0,0.5)'
+                color='rgba(0,0,0,0.5)',
+                symmetric=False
             ),
-            text=sig_text if settings.get('show_significance', True) else None,
-            textposition='outside',
-            textfont=dict(size=settings.get('sig_font_size', 16), color='black'),
             marker=dict(
                 color=bar_colors,
                 line=dict(
@@ -553,75 +583,111 @@ class GraphGenerator:
             showlegend=False
         ))
         
-        # Add expected direction annotation
-        if efficacy_config and 'expected_direction' in efficacy_config:
-            direction = efficacy_config.get('expected_direction', {}).get(gene, '')
-            if direction == 'up':
+        # Add significance stars - aligned with bars
+        for idx in range(n_bars):
+            row = gene_data_indexed.iloc[idx]
+            condition = row['Condition']
+            bar_key = f"{gene}_{condition}"
+            bar_config = gene_bar_settings.get(bar_key, {'show_sig': True, 'show_err': True})
+            
+            sig = row.get('significance', '')
+            if show_sig_global and bar_config.get('show_sig', True) and sig in ['*', '**', '***']:
+                # Calculate y position: bar height + error bar + small offset
+                bar_height = row['Relative_Expression']
+                error_bar_height = error_visible_array[idx]
+                y_position = bar_height + error_bar_height + (bar_height * 0.05)
+                
+                # Use index-based positioning to match bars exactly
                 fig.add_annotation(
-                    text='↑ Expected Increase',
-                    xref='paper', yref='paper',
-                    x=0.02, y=0.98,
+                    x=idx,
+                    y=y_position,
+                    text=sig,
                     showarrow=False,
-                    font=dict(size=12, color='red'),
-                    align='left'
-                )
-            elif direction == 'down':
-                fig.add_annotation(
-                    text='↓ Expected Decrease',
-                    xref='paper', yref='paper',
-                    x=0.02, y=0.98,
-                    showarrow=False,
-                    font=dict(size=12, color='blue'),
-                    align='left'
+                    font=dict(size=settings.get('sig_font_size', 12), color='black'),
+                    xref='x',
+                    yref='y',
+                    xanchor='center',
+                    yanchor='bottom'
                 )
         
-        # Update layout
+        # Custom y-axis label with bold red gene name
+        y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
+        
+        # Calculate max value for y-axis range
+        max_y_value = gene_data_indexed['Relative_Expression'].max()
+        max_error = error_array.max() if len(error_array) > 0 else 0
+        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
+        
+        # Y-axis configuration
         y_axis_config = dict(
-            title=settings.get('ylabel', 'Fold Change'),
-            showgrid=settings.get('show_grid', True),
-            gridcolor='lightgray'
+            title=dict(
+                text=y_label_html,
+                font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
+            ),
+            showgrid=False,
+            zeroline=True,        # CHANGED: Show horizontal line at y=0
+            zerolinewidth=1,    # ADDED: Match y-axis line thickness
+            zerolinecolor='black', # ADDED: Black baseline
+            range=[0, y_max_auto],
+            fixedrange=False
         )
         
         if settings.get('y_log_scale'):
             y_axis_config['type'] = 'log'
+            y_axis_config.pop('range', None)
         
+        # Manual range override if user specified
         if settings.get('y_min') is not None or settings.get('y_max') is not None:
             y_range = []
-            if settings.get('y_min') is not None:
-                y_range.append(settings['y_min'])
-            if settings.get('y_max') is not None:
-                y_range.append(settings['y_max'])
-            if len(y_range) == 2:
-                y_axis_config['range'] = y_range
+            y_range.append(settings.get('y_min', 0))  # Always start at 0 or user-specified min
+            y_range.append(settings.get('y_max', y_max_auto))
+            y_axis_config['range'] = y_range
         
-        # Get gene-specific settings (fallback to global)
+        # Get gene-specific settings
         gene_bar_gap = settings.get(f"{gene}_bar_gap", settings.get('bar_gap', 0.15))
         gene_margins = settings.get(f"{gene}_margins", {'l': 80, 'r': 80, 't': 100, 'b': 100})
         gene_bg_color = settings.get(f"{gene}_bg_color", settings.get('plot_bgcolor', '#FFFFFF'))
-        gene_grid_color = settings.get(f"{gene}_grid_color", '#E5E5E5')
-        gene_grid_width = settings.get(f"{gene}_grid_width", 1)
-        gene_xlabel_size = settings.get(f"{gene}_xlabel_size", 14)
-        gene_ylabel_size = settings.get(f"{gene}_ylabel_size", 14)
-        gene_xlabel_color = settings.get(f"{gene}_xlabel_color", '#000000')
-        gene_ylabel_color = settings.get(f"{gene}_ylabel_color", '#000000')
         gene_tick_size = settings.get(f"{gene}_tick_size", 12)
-        gene_tick_angle = settings.get(f"{gene}_tick_angle", -45)
+        
+        # Wrap x-axis labels - all of them
+        wrapped_labels = [GraphGenerator._wrap_text(str(cond), 15) for cond in condition_names]
+        
+        # P-VALUE LEGEND
+        fig.add_annotation(
+            text="<b>Significance:</b>  * p<0.05  ** p<0.01  *** p<0.001",
+            xref="paper", yref="paper",
+            x=1.0, y=-0.15,
+            xanchor='right', yanchor='top',
+            showarrow=False,
+            font=dict(size=14, color='#666666', family='Arial'),
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='#CCCCCC',
+            borderwidth=1,
+            borderpad=4
+        )
         
         fig.update_layout(
             title=dict(
                 text=f"{gene} Expression",
-                font=dict(size=settings.get('title_size', 20))
+                font=dict(size=settings.get('title_size', 20), family='Arial', color='#333333'),
+                x=0.5,
+                xanchor='center',
+                y=0.98,
+                yanchor='top'
             ),
             xaxis=dict(
-                title=dict(
-                    text=settings.get('xlabel', 'Condition'),
-                    font=dict(size=gene_xlabel_size, color=gene_xlabel_color)
-                ),
-                showgrid=settings.get('show_grid', True),
-                gridcolor=gene_grid_color,
-                gridwidth=gene_grid_width,
-                tickangle=gene_tick_angle,
-                tickfont=dict(size=gene_tick_size)
+                title=None,
+                showgrid=False,
+                zeroline=False,
+                tickmode='array',
+                tickvals=list(range(n_bars)),
+                ticktext=wrapped_labels,
+                tickfont=dict(size=gene_tick_size),
+                tickangle=0,
+                showline=False,       # CHANGED: Hide x-axis line
+                mirror=False,
+                side='bottom',
+                range=[-0.5, n_bars - 0.5]
             ),
             yaxis=y_axis_config,
             template=settings.get('color_scheme', 'plotly_white'),
@@ -631,11 +697,12 @@ class GraphGenerator:
             bargap=gene_bar_gap,
             showlegend=settings.get('show_legend', False),
             plot_bgcolor=gene_bg_color,
+            paper_bgcolor='#FFFFFF',
             margin=dict(
-                l=gene_margins['l'],
-                r=gene_margins['r'],
-                t=gene_margins['t'],
-                b=gene_margins['b']
+                l=gene_margins.get('l', 80),
+                r=gene_margins.get('r', 80),
+                t=gene_margins.get('t', 100),
+                b=gene_margins.get('b', 120)
             )
         )
         
@@ -699,24 +766,6 @@ with st.sidebar:
     6. **Customize** individual graphs
     7. **Export** all results
     """)
-    
-    st.subheader("📋 Templates")
-    template_name = st.text_input("Save analysis as:")
-    if st.button("💾 Save") and st.session_state.sample_mapping:
-        st.session_state.analysis_templates[template_name] = {
-            'mapping': st.session_state.sample_mapping.copy(),
-            'efficacy': st.session_state.selected_efficacy,
-            'timestamp': datetime.now().isoformat()
-        }
-        st.success(f"✅ Saved '{template_name}'")
-    
-    if st.session_state.analysis_templates:
-        load = st.selectbox("Load:", [""] + list(st.session_state.analysis_templates.keys()))
-        if load:
-            template = st.session_state.analysis_templates[load]
-            st.session_state.sample_mapping = template['mapping']
-            st.session_state.selected_efficacy = template.get('efficacy')
-            st.info(f"✅ Loaded '{load}'")
 
 # Main tabs
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📁 Upload & Filter", "🗺️ Sample Mapping", "🔬 Analysis", "📊 Graphs", "📤 Export"])
@@ -739,6 +788,24 @@ with tab1:
         if all_data:
             st.session_state.data = pd.concat(all_data, ignore_index=True)
             
+            # Natural sort samples by extracting numbers
+            import re
+            def natural_sort_key(sample_name):
+                """Extract numbers from sample name for natural sorting"""
+                # Convert to string and extract all numbers
+                parts = re.split(r'(\d+)', str(sample_name))
+                # Convert numeric parts to integers for proper sorting
+                return [int(part) if part.isdigit() else part.lower() for part in parts]
+            
+            # Get unique samples and sort them naturally
+            unique_samples = sorted(
+                st.session_state.data['Sample'].unique(),
+                key=natural_sort_key
+            )
+            
+            # Initialize sample_order with naturally sorted samples
+            st.session_state.sample_order = unique_samples
+            
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Wells", len(st.session_state.data))
             col2.metric("Samples", st.session_state.data['Sample'].nunique())
@@ -751,54 +818,10 @@ with tab1:
                 st.session_state.hk_gene = st.selectbox("🔬 Housekeeping Gene", hk_genes, key='hk_select')
                 col4.metric("HK Gene", st.session_state.hk_gene)
             
-            # Sample filter
-            st.subheader("🎯 Filter Samples")
-            st.markdown("*Select samples to INCLUDE in analysis*")
+            # Data preview
+            st.subheader("📊 Data Preview")
+            st.dataframe(st.session_state.data.head(50), height=300)
             
-            all_samples = sorted(st.session_state.data['Sample'].unique())
-            selected_samples = st.multiselect(
-                "Include these samples:",
-                all_samples,
-                default=all_samples,
-                help="Deselect samples you want to exclude"
-            )
-            st.session_state.excluded_samples = set(all_samples) - set(selected_samples)
-            
-            if st.session_state.excluded_samples:
-                st.warning(f"⚠️ Excluding {len(st.session_state.excluded_samples)} samples: {', '.join(list(st.session_state.excluded_samples)[:5])}")
-            
-            # Gene filter
-            st.subheader("🧬 Filter Genes")
-            all_genes = sorted(st.session_state.data['Target'].unique())
-            selected_genes = st.multiselect(
-                "Include these genes:",
-                all_genes,
-                default=all_genes,
-                help="Deselect genes you want to exclude from analysis"
-            )
-            
-            # Filter data display
-            display_data = st.session_state.data[
-                st.session_state.data['Sample'].isin(selected_samples) &
-                st.session_state.data['Target'].isin(selected_genes)
-            ]
-            
-            st.subheader("📊 Filtered Data Preview")
-            st.dataframe(display_data.head(50), height=300)
-            
-            # Outlier detection
-            st.subheader("🚩 Outlier Detection")
-            for target in selected_genes:
-                target_data = display_data[display_data['Target'] == target]
-                q1, q3 = target_data['CT'].quantile([0.25, 0.75])
-                iqr = q3 - q1
-                outliers = target_data[(target_data['CT'] < q1 - 1.5*iqr) | (target_data['CT'] > q3 + 1.5*iqr)]
-                
-                if len(outliers) > 0:
-                    with st.expander(f"⚠️ {target}: {len(outliers)} outliers"):
-                        st.dataframe(outliers[['Well', 'Sample', 'CT']])
-                        if st.checkbox(f"Exclude these wells", key=f"out_{target}"):
-                            st.session_state.excluded_wells.update(outliers['Well'].tolist())
 
 # ==================== TAB 2: SAMPLE MAPPING ====================
 with tab2:
@@ -833,8 +856,107 @@ with tab2:
         st.markdown("---")
         st.markdown("### 🗺️ Sample Condition Mapping")
         
-        samples = [s for s in sorted(st.session_state.data['Sample'].unique()) 
-                  if s not in st.session_state.excluded_samples]
+        # ============ MANUAL ORDER ENTRY FEATURE ============
+        with st.expander("🔢 Advanced: Manual Order Entry", expanded=False):
+            st.info("💡 Enter comma-separated sample indices (1-based) to reorder. Example: 3,1,4,2,5")
+            
+            # Show current order with indices
+            current_order_text = ", ".join([
+                f"{idx+1}={sample[:20]}" 
+                for idx, sample in enumerate(st.session_state.sample_order)
+            ])
+            st.caption(f"Current order: {current_order_text}")
+            
+            col_input, col_apply = st.columns([4, 1])
+            
+            with col_input:
+                new_order_input = st.text_input(
+                    "New order (e.g., 3,1,2,4,5):",
+                    placeholder="3,1,2,4,5",
+                    key="manual_order_input",
+                    label_visibility="collapsed"
+                )
+            
+            with col_apply:
+                if st.button("Apply", key="apply_manual_order", use_container_width=True):
+                    try:
+                        # Parse input
+                        indices = [int(x.strip()) - 1 for x in new_order_input.split(',')]
+                        
+                        # Validate
+                        if len(indices) != len(st.session_state.sample_order):
+                            st.error(f"❌ Need exactly {len(st.session_state.sample_order)} indices")
+                        elif set(indices) != set(range(len(st.session_state.sample_order))):
+                            st.error("❌ Use each number exactly once (no duplicates)")
+                        elif any(i < 0 or i >= len(st.session_state.sample_order) for i in indices):
+                            st.error(f"❌ Numbers must be between 1 and {len(st.session_state.sample_order)}")
+                        else:
+                            # Apply new order
+                            new_order = [st.session_state.sample_order[i] for i in indices]
+                            st.session_state.sample_order = new_order
+                            st.success("✅ Order updated!")
+                            st.rerun()
+                    except ValueError:
+                        st.error("❌ Invalid format. Use numbers separated by commas: 3,1,2")
+
+        st.markdown("---")
+        
+        # ============ QUICK SWAP FEATURE ============
+        with st.expander("🔄 Quick Swap Positions", expanded=False):
+            st.info("💡 Swap any two sample positions")
+            
+            col_pos1, col_pos2, col_swap = st.columns([2, 2, 1])
+            
+            with col_pos1:
+                swap_pos1 = st.number_input(
+                    "Position 1",
+                    min_value=1,
+                    max_value=len(st.session_state.sample_order),
+                    value=1,
+                    key="swap_pos1"
+                )
+                st.caption(f"→ {st.session_state.sample_order[swap_pos1-1][:30]}")
+            
+            with col_pos2:
+                swap_pos2 = st.number_input(
+                    "Position 2",
+                    min_value=1,
+                    max_value=len(st.session_state.sample_order),
+                    value=min(2, len(st.session_state.sample_order)),
+                    key="swap_pos2"
+                )
+                st.caption(f"→ {st.session_state.sample_order[swap_pos2-1][:30]}")
+            
+            with col_swap:
+                st.write("")  # Spacing
+                if st.button("Swap", key="execute_swap", use_container_width=True):
+                    if swap_pos1 != swap_pos2:
+                        idx1, idx2 = swap_pos1 - 1, swap_pos2 - 1
+                        st.session_state.sample_order[idx1], st.session_state.sample_order[idx2] = \
+                            st.session_state.sample_order[idx2], st.session_state.sample_order[idx1]
+                        st.success(f"✅ Swapped positions {swap_pos1} ↔ {swap_pos2}")
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ Select different positions")
+
+        st.markdown("---")
+        
+        # Use sample_order if exists, otherwise get from data with natural sort
+        if 'sample_order' in st.session_state and st.session_state.sample_order:
+            samples = [s for s in st.session_state.sample_order 
+                      if s not in st.session_state.excluded_samples]
+        else:
+            import re
+            def natural_sort_key(sample_name):
+                parts = re.split(r'(\d+)', str(sample_name))
+                return [int(part) if part.isdigit() else part.lower() for part in parts]
+            
+            samples = sorted(
+                [s for s in st.session_state.data['Sample'].unique() 
+                 if s not in st.session_state.excluded_samples],
+                key=natural_sort_key
+            )
+            st.session_state.sample_order = samples
         
         # Group type options
         group_types = ['Negative Control', 'Positive Control', 'Treatment']
@@ -857,52 +979,6 @@ with tab2:
             if 'include' not in st.session_state.sample_mapping[sample]:
                 st.session_state.sample_mapping[sample]['include'] = True
         
-        # Master controls in styled container
-        st.markdown("""
-        <style>
-        .control-panel {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-        .control-button {
-            background-color: white;
-            color: #667eea;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: bold;
-        }
-        </style>
-        """, unsafe_allow_html=True)
-        
-        st.markdown('<div class="control-panel">', unsafe_allow_html=True)
-        col_master1, col_master2, col_master3 = st.columns(3)
-        
-        with col_master1:
-            if st.button("✅ Include ALL Samples", use_container_width=True):
-                for s in st.session_state.sample_order:
-                    st.session_state.sample_mapping[s]['include'] = True
-                st.session_state.excluded_samples = set()
-                st.rerun()
-        
-        with col_master2:
-            if st.button("🚫 Exclude ALL Samples", use_container_width=True):
-                for s in st.session_state.sample_order:
-                    st.session_state.sample_mapping[s]['include'] = False
-                st.session_state.excluded_samples = set(st.session_state.sample_order)
-                st.rerun()
-        
-        with col_master3:
-            if st.button("🔄 Reset Mapping", use_container_width=True):
-                st.session_state.sample_mapping = {}
-                st.session_state.sample_order = samples.copy()
-                st.rerun()
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
         # Header row with styled background
         st.markdown("""
         <div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>
@@ -913,95 +989,89 @@ with tab2:
                     <th style='width: 15%;'>Original</th>
                     <th style='width: 25%;'>Condition Name</th>
                     <th style='width: 20%;'>Group</th>
-                    <th style='width: 15%;'>Concentration</th>
                     <th style='width: 10%;'>Move</th>
                 </tr>
             </table>
         </div>
         """, unsafe_allow_html=True)
         
-        # Sample rows with improved spacing
-        for i, sample in enumerate(st.session_state.sample_order):
-            # Container for each row
-            with st.container():
-                col0, col_order, col1, col2, col3, col4, col_move = st.columns([0.5, 0.8, 1.5, 2.5, 2, 1.5, 1])
+       # Sample rows with improved spacing
+    for i, sample in enumerate(st.session_state.sample_order):
+        # Container for each row
+        with st.container():
+            col0, col_order, col1, col2, col3, col_move = st.columns([0.5, 0.8, 1.5, 2.5, 2, 1])
+            
+            # Include checkbox
+            with col0:
+                include = st.checkbox(
+                    "", 
+                    value=st.session_state.sample_mapping[sample].get('include', True),
+                    key=f"include_{sample}_{i}",  # ✅ FIXED
+                    label_visibility="collapsed"
+                )
+                st.session_state.sample_mapping[sample]['include'] = include
+            
+            # Order number
+            with col_order:
+                st.markdown(f"<div style='text-align: center; padding-top: 10px;'><b>{i+1}</b></div>", unsafe_allow_html=True)
+            
+            # Original sample name (non-editable)
+            with col1:
+                st.text_input(
+                    "Original", 
+                    sample, 
+                    key=f"orig_{sample}_{i}",  # ✅ FIXED
+                    disabled=True, 
+                    label_visibility="collapsed"
+                )
+            
+            # Condition name (editable)
+            with col2:
+                cond = st.text_input(
+                    "Condition",
+                    st.session_state.sample_mapping[sample]['condition'],
+                    key=f"cond_{sample}_{i}",  # ✅ FIXED
+                    label_visibility="collapsed",
+                    placeholder="Enter condition name..."
+                )
+                st.session_state.sample_mapping[sample]['condition'] = cond
+            
+            # Group selector
+            with col3:
+                grp_idx = 0
+                try:
+                    grp_idx = group_types.index(st.session_state.sample_mapping[sample]['group'])
+                except:
+                    pass
                 
-                # Include checkbox
-                with col0:
-                    include = st.checkbox(
-                        "", 
-                        value=st.session_state.sample_mapping[sample].get('include', True),
-                        key=f"include_{sample}",
-                        label_visibility="collapsed"
-                    )
-                    st.session_state.sample_mapping[sample]['include'] = include
-                
-                # Order number
-                with col_order:
-                    st.markdown(f"<div style='text-align: center; padding-top: 10px;'><b>{i+1}</b></div>", unsafe_allow_html=True)
-                
-                # Original sample name (non-editable)
-                with col1:
-                    st.text_input("Original", sample, key=f"orig_{sample}", disabled=True, label_visibility="collapsed")
-                
-                # Condition name (editable)
-                with col2:
-                    cond = st.text_input(
-                        "Condition",
-                        st.session_state.sample_mapping[sample]['condition'],
-                        key=f"cond_{sample}",
-                        label_visibility="collapsed",
-                        placeholder="Enter condition name..."
-                    )
-                    st.session_state.sample_mapping[sample]['condition'] = cond
-                
-                # Group selector
-                with col3:
-                    grp_idx = 0
-                    try:
-                        grp_idx = group_types.index(st.session_state.sample_mapping[sample]['group'])
-                    except:
-                        pass
-                    
-                    grp = st.selectbox(
-                        "Group",
-                        group_types,
-                        index=grp_idx,
-                        key=f"grp_{sample}",
-                        label_visibility="collapsed"
-                    )
-                    st.session_state.sample_mapping[sample]['group'] = grp
-                
-                # Concentration
-                with col4:
-                    conc = st.text_input(
-                        "Conc",
-                        st.session_state.sample_mapping[sample]['concentration'],
-                        key=f"conc_{sample}",
-                        label_visibility="collapsed",
-                        placeholder="e.g., 10µM"
-                    )
-                    st.session_state.sample_mapping[sample]['concentration'] = conc
-                
-                # Move buttons
-                with col_move:
-                    move_col1, move_col2 = st.columns(2)
-                    with move_col1:
-                        if i > 0:
-                            if st.button("⬆", key=f"up_{sample}", help="Move up"):
-                                order = st.session_state.sample_order
-                                order[i-1], order[i] = order[i], order[i-1]
-                                st.rerun()
-                    with move_col2:
-                        if i < len(st.session_state.sample_order) - 1:
-                            if st.button("⬇", key=f"down_{sample}", help="Move down"):
-                                order = st.session_state.sample_order
-                                order[i+1], order[i] = order[i], order[i+1]
-                                st.rerun()
-                
-                # Divider line
-                st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
-        
+                grp = st.selectbox(
+                    "Group",
+                    group_types,
+                    index=grp_idx,
+                    key=f"grp_{sample}_{i}",  # ✅ FIXED
+                    label_visibility="collapsed"
+                )
+                st.session_state.sample_mapping[sample]['group'] = grp
+            
+            # Move controls - FIXED SWAP LOGIC
+            with col_move:
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    if i > 0:
+                        if st.button("⬆", key=f"up_{sample}_{i}", help="Move up", use_container_width=True):
+                            st.session_state.sample_order[i], st.session_state.sample_order[i-1] = \
+                                st.session_state.sample_order[i-1], st.session_state.sample_order[i]
+                            st.rerun()
+                with btn_col2:
+                    if i < len(st.session_state.sample_order) - 1:
+                        if st.button("⬇", key=f"down_{sample}_{i}", help="Move down", use_container_width=True):
+                            st.session_state.sample_order[i], st.session_state.sample_order[i+1] = \
+                                st.session_state.sample_order[i+1], st.session_state.sample_order[i]
+                            st.rerun()
+                            
+            # Divider line
+            st.markdown("<hr style='margin: 5px 0; opacity: 0.3;'>", unsafe_allow_html=True)
+            
         # Update excluded_samples from include flags
         st.session_state.excluded_samples = set([
             s for s, v in st.session_state.sample_mapping.items() 
@@ -1037,20 +1107,28 @@ with tab2:
                     'Original': s,
                     'Condition': v['condition'],
                     'Group': v['group'],
-                    'Concentration': v['concentration']
                 }
                 for idx, s in enumerate(st.session_state.sample_order)
                 for v in [st.session_state.sample_mapping[s]]
             ])
             st.dataframe(mapping_df, use_container_width=True, hide_index=True)
-          
         # Run analysis   
         st.markdown("---")
         st.subheader("🔬 Run Full Analysis (ΔΔCt + Statistics)")
         
-        sample_keys = st.session_state.get('sample_order') or list(st.session_state.sample_mapping.keys())
+        # Build condition list from mapping
+        condition_list = []
+        sample_to_condition = {}
         
-        if sample_keys:
+        for sample in st.session_state.get('sample_order', []):
+            if sample in st.session_state.sample_mapping:
+                mapping_info = st.session_state.sample_mapping[sample]
+                if mapping_info.get('include', True):
+                    condition = mapping_info.get('condition', sample)
+                    condition_list.append(condition)
+                    sample_to_condition[condition] = sample
+        
+        if condition_list:
             # Enhanced layout with clear separation
             st.markdown("#### 📊 Analysis Configuration")
             
@@ -1062,26 +1140,26 @@ with tab2:
             
             col_r1, col_r2 = st.columns(2)
             with col_r1:
-                ref_choice = st.selectbox(
-                    "🎯 ΔΔCt Reference Sample",
-                    sample_keys,
+                ref_condition = st.selectbox(
+                    "🎯 ΔΔCt Reference Condition",
+                    condition_list,
                     index=0,
                     key="ref_choice_ddct",
                     help="Baseline for relative expression calculation"
                 )
-                ref_condition = st.session_state.sample_mapping.get(ref_choice, {}).get('condition', ref_choice)
-                st.caption(f"→ Condition: **{ref_condition}**")
+                ref_sample_key = sample_to_condition[ref_condition]
+                st.caption(f"→ Sample: **{ref_sample_key}**")
             
             with col_r2:
-                cmp_choice = st.selectbox(
-                    "📈 P-value Reference Sample",
-                    sample_keys,
+                cmp_condition = st.selectbox(
+                    "📈 P-value Reference Condition",
+                    condition_list,
                     index=0,
                     key="cmp_choice_pval",
                     help="Control group for statistical testing"
                 )
-                cmp_condition = st.session_state.sample_mapping.get(cmp_choice, {}).get('condition', cmp_choice)
-                st.caption(f"→ Condition: **{cmp_condition}**")
+                cmp_sample_key = sample_to_condition[cmp_condition]
+                st.caption(f"→ Sample: **{cmp_sample_key}**")
             
             # Visual summary
             st.markdown("---")
@@ -1099,7 +1177,7 @@ with tab2:
             
             # Run button
             if st.button("▶️ Run Full Analysis Now", type="primary", use_container_width=True):
-                ok = AnalysisEngine.run_full_analysis(ref_choice, cmp_choice)
+                ok = AnalysisEngine.run_full_analysis(ref_sample_key, cmp_sample_key)
                 if ok:
                     st.success(f"✅ Analysis complete!\n\n- Fold changes relative to: **{ref_condition}**\n- P-values vs: **{cmp_condition}**")
                     st.balloons()
@@ -1163,236 +1241,285 @@ with tab3:
     else:
         st.info("⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'")
         
-# ==================== TAB 4: GRAPHS (IMPROVED UI/UX - ERROR-SAFE) ====================
+# ==================== TAB 4: GRAPHS ====================
 with tab4:
-    st.header("Step 4: Advanced Gene Visualization 📈")
-    st.markdown("---")
+    st.header("Step 4: Individual Gene Graphs")
     
+    # === COMPACT CSS STYLING ===
+    st.markdown("""
+    <style>
+    /* Make graphs POP */
+    [data-testid="stPlotlyChart"] {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        border-radius: 8px;
+        background: white;
+        padding: 10px;
+    }
+    
+    /* Compact control panels */
+    .stExpander {
+        background-color: #FAFAFA;
+        border-left: 3px solid #E0E0E0;
+        margin-bottom: 5px;
+    }
+    
+    /* Reduce all font sizes in controls column */
+    [data-testid="column"]:first-child {
+        font-size: 11px;
+    }
+    
+    [data-testid="column"]:first-child h3 {
+        font-size: 14px;
+        margin-top: 5px;
+        margin-bottom: 5px;
+    }
+    
+    [data-testid="column"]:first-child h4 {
+        font-size: 12px;
+        margin-top: 8px;
+        margin-bottom: 5px;
+    }
+    
+    /* Compact checkboxes */
+    [data-testid="column"]:first-child .stCheckbox {
+        margin-bottom: 5px;
+    }
+    
+    /* Compact sliders */
+    [data-testid="column"]:first-child .stSlider {
+        margin-bottom: 5px;
+    }
+    
+    /* Compact expanders */
+    [data-testid="column"]:first-child [data-testid="stExpander"] {
+        font-size: 10px;
+        padding: 2px;
+    }
+    
+    /* Compact buttons */
+    [data-testid="column"]:first-child button {
+        font-size: 10px;
+        padding: 2px 8px;
+        height: 28px;
+    }
+    
+    /* Compact color picker */
+    [data-testid="column"]:first-child input[type="color"] {
+        height: 25px;
+    }
+    
+    /* Make graph column stand out */
+    [data-testid="column"]:last-child {
+        background: linear-gradient(to right, #F8F9FA, #FFFFFF);
+        padding: 20px;
+        border-radius: 10px;
+    }
+    
+    /* Emphasize gene titles */
+    h2 {
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     if st.session_state.processed_data:
-        
-        # --- Persistent Settings Initialization ---
-        # 1. Global Settings
+        # Initialize graph settings
         if 'graph_settings' not in st.session_state:
-            st.session_state.graph_settings = { 
-                'title_size': 24, 'font_size': 12, 'sig_font_size': 18, 
-                'figure_width': 700, 'figure_height': 500, 
-                'color_scheme': 'plotly_white', 'show_error': True, 
-                'show_significance': True, 'show_grid': True, 
-                'xlabel': 'Condition', 'ylabel': 'Fold Change (Relative Expression)', 
-                'bar_colors': {}, 'error_multiplier': 1.96, 'bar_opacity': 0.95, 
-                'bar_gap': 0.1, 'marker_line_width': 1, 'show_legend': False, 
-                'y_log_scale': False, 'y_min': 0, 'y_max': None,
-                'bar_colors_per_sample': {}
+            st.session_state.graph_settings = {
+                'title_size': 20, 'font_size': 14, 'sig_font_size': 18,
+                'figure_width': 1000, 'figure_height': 600,
+                'color_scheme': 'plotly_white', 'show_error': True,
+                'show_significance': True, 'show_grid': True,
+                'xlabel': 'Condition', 'ylabel': 'Relative mRNA Expression Level',
+                'bar_colors': {}, 'orientation': 'v', 'error_multiplier': 1.96,
+                'bar_opacity': 0.95, 'bar_gap': 0.15, 'marker_line_width': 1,
+                'show_legend': False, 'y_log_scale': False, 'y_min': None, 'y_max': None
             }
-            
-        # 2. Per-Gene Customizations (Dedicated Dictionary for safety and clarity)
-        if 'gene_customizations' not in st.session_state:
-            st.session_state.gene_customizations = {}
-
-        # --- PRE-INITIALIZE ALL GENE SETTINGS (CRITICAL ERROR FIX) ---
-        # This loop runs once or on rerun, ensuring all necessary keys exist 
-        # BEFORE the main plotting loop (the one that causes the error) begins.
-        for gene in st.session_state.processed_data.keys():
-            if gene not in st.session_state.gene_customizations:
-                st.session_state.gene_customizations[gene] = {
-                    'title_size': st.session_state.graph_settings['title_size'],
-                    'y_log_scale': st.session_state.graph_settings['y_log_scale'],
-                    'y_min': st.session_state.graph_settings['y_min'],
-                    'y_max': st.session_state.graph_settings['y_max'],
-                    'bar_gap': st.session_state.graph_settings['bar_gap'],
-                    'tick_angle': -45, # Default value
-                    'bg_color': '#FFFFFF', # Default value
-                    'grid_color': '#E5E5E5', # Default value
-                }
         
-        # --- Global Defaults/Reset Panel (Compact Expander) ---
-        # This replaces the old, large Global Graph Settings panel
-        with st.expander("🛠️ Global Visualization Defaults & Reset", expanded=False):
-            col_g1, col_g2, col_g3 = st.columns(3)
-            
-            with col_g1:
-                st.session_state.graph_settings['figure_width'] = st.number_input(
-                    "Default Width (px)", 300, 2000, st.session_state.graph_settings['figure_width'], key='g_width', step=100
-                )
-                st.session_state.graph_settings['figure_height'] = st.number_input(
-                    "Default Height (px)", 300, 1400, st.session_state.graph_settings['figure_height'], key='g_height', step=100
-                )
-            
-            with col_g2:
-                themes = ['plotly_white', 'plotly', 'simple_white', 'plotly_dark', 'seaborn', 'presentation']
-                curr_theme = st.session_state.graph_settings.get('color_scheme', 'plotly_white')
-                st.session_state.graph_settings['color_scheme'] = st.selectbox(
-                    "Default Theme", themes, index=themes.index(curr_theme) if curr_theme in themes else 0, key='g_theme'
-                )
-                st.session_state.graph_settings['font_size'] = st.slider( "Default Font Size", 8, 20, st.session_state.graph_settings['font_size'], key='g_font' )
-            
-            with col_g3:
-                st.session_state.graph_settings['show_error'] = st.checkbox("Show Error Bars", st.session_state.graph_settings['show_error'], key='g_error')
-                st.session_state.graph_settings['show_significance'] = st.checkbox("Show Significance Stars", st.session_state.graph_settings['show_significance'], key='g_sig')
-                if st.button("🔄 Reset ALL Settings", use_container_width=True):
-                    # Safely delete keys and force a rerun
-                    for key in ['graph_settings', 'gene_customizations', 'graphs']:
-                         if key in st.session_state:
-                             del st.session_state[key]
-                    st.rerun()
-
-        st.markdown("---")
+        # Generate graphs for each gene
+        st.subheader("📊 Gene Graphs")
         
-        # --- Gene-by-Gene Iteration (New UI/UX) ---
         efficacy_config = EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {})
         
-        # Use columns for a clean 2-column layout of genes
-        gene_columns = st.columns(2)
-        
-        # Iterate over the stable dictionary keys
-        for i, gene in enumerate(st.session_state.processed_data.keys()):
-            # Get the dedicated settings dictionary for the current gene
-            gene_settings = st.session_state.gene_customizations[gene] 
+        if 'graphs' not in st.session_state:
+            st.session_state.graphs = {}
+
+        for gene in st.session_state.processed_data.keys():
+            st.markdown("---")
+            st.markdown(f"<h2 style='text-align: center; padding: 15px 0;'>🧬 {gene}</h2>", unsafe_allow_html=True)
             
-            with gene_columns[i % 2]:
+            # CREATE TWO-COLUMN LAYOUT - Narrower controls
+            col_controls, col_graph = st.columns([1.5, 4])  # Changed from [2, 3] to [1.5, 4]
+            
+            with col_controls:
+                st.markdown("<h3 style='margin-bottom: 10px;'>⚙️ Controls</h3>", unsafe_allow_html=True)
                 
-                # --- High-Tech Panel Container (CSS for WoW factor) ---
-                st.markdown(f"""
-                <div style='
-                    background-color: #f8f9fa; 
-                    padding: 15px; 
-                    border-radius: 10px; 
-                    margin-bottom: 20px; 
-                    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-                    border-left: 5px solid #007bff;
-                '>
-                    <h3 style='margin-top: 0; color: #007bff;'>🧬 {gene} Result</h3>
-                """, unsafe_allow_html=True)
+                # === DISPLAY OPTIONS ===
+                st.markdown("<h4>📊 Display</h4>", unsafe_allow_html=True)
                 
-                # --- 1. Compact Customization Bar ---
-                col_c1, col_c2, col_c3, col_c4, col_c5 = st.columns([1, 1.5, 1, 1, 1])
+                show_sig_key = f"{gene}_show_sig"
+                show_err_key = f"{gene}_show_err"
                 
-                # Toggle Log Scale (Uses gene_settings directly)
-                with col_c1:
-                    gene_settings['y_log_scale'] = st.checkbox(
-                        "Log Y", gene_settings['y_log_scale'], key=f"log_y_{gene}", help="Toggle Y-axis logarithmic scale", label_visibility="collapsed"
-                    )
-                    st.caption("Log Y")
-                    
-                # Title Size Override (Uses gene_settings directly)
-                with col_c2:
-                    gene_settings['title_size'] = st.slider(
-                        "Title Size", 10, 40, gene_settings['title_size'], key=f"ts_{gene}", label_visibility="collapsed"
-                    )
-                    st.caption("Title Size")
+                if show_sig_key not in st.session_state.graph_settings:
+                    st.session_state.graph_settings[show_sig_key] = True
+                if show_err_key not in st.session_state.graph_settings:
+                    st.session_state.graph_settings[show_err_key] = True
                 
-                # Y-Range Popover
-                with col_c3:
-                    with st.popover("📐 Range"):
-                        st.markdown("**Y-Axis Range**")
-                        
-                        gene_settings['y_min'] = st.number_input(
-                            "Min Y", value=gene_settings['y_min'], key=f"ymin_{gene}"
-                        )
-                        gene_settings['y_max'] = st.number_input(
-                            "Max Y", value=gene_settings['y_max'], key=f"ymax_{gene}"
-                        )
-                    st.caption("Y-Axis")
-
-                # Advanced Layout Popover
-                with col_c4:
-                    with st.popover("⚙️ Layout"):
-                        st.markdown("**Advanced Layout**")
-                        col_l1, col_l2 = st.columns(2)
-                        
-                        with col_l1:
-                            # Bar Gap
-                            gene_settings['bar_gap'] = st.slider(
-                                "Bar Gap", 0.0, 0.5, gene_settings['bar_gap'], 0.01, key=f"gap_{gene}", label_visibility="collapsed"
-                            )
-                            # X-Tick Angle
-                            gene_settings['tick_angle'] = st.slider( 
-                                "X-Tick Angle", -90, 90, gene_settings['tick_angle'], key=f"tickang_{gene}", label_visibility="collapsed"
-                            )
-                            
-                        with col_l2:
-                            # Plot BG Color
-                            gene_settings['bg_color'] = st.color_picker(
-                                "BG Color", gene_settings['bg_color'], key=f"bgc_{gene}", label_visibility="collapsed"
-                            )
-                            # Grid Color
-                            gene_settings['grid_color'] = st.color_picker(
-                                "Grid Color", gene_settings['grid_color'], key=f"gc_{gene}", label_visibility="collapsed"
-                            )
-                    st.caption("Layout")
+                st.session_state.graph_settings[show_sig_key] = st.checkbox(
+                    "✨ Significance",
+                    st.session_state.graph_settings[show_sig_key],
+                    key=f"chk_sig_{gene}"
+                )
                 
-                # Color Picker Popover
-                with col_c5:
-                    gene_data_for_color = st.session_state.processed_data[gene]
-                    conditions = gene_data_for_color['Condition'].unique()
-                    
-                    with st.popover("🎨 Colors"):
-                        st.markdown(f"**Gene Default Color:**")
-                        default_color = st.session_state.graph_settings['bar_colors'].get(gene, '#007bff')
-                        st.session_state.graph_settings['bar_colors'][gene] = st.color_picker(
-                            f"Default Color for {gene}", default_color, key=f"gene_color_{gene}"
-                        )
-                        st.markdown("---")
-                        st.markdown(f"**Individual Bar Overrides:**")
-                        
-                        # Loop through conditions to offer individual overrides
-                        for condition in conditions:
-                            custom_key = f"{gene}_{condition}"
-                            
-                            # Determine current color (default to gene default if no override)
-                            current_bar_color = st.session_state.graph_settings['bar_colors_per_sample'].get(
-                                custom_key, 
-                                st.session_state.graph_settings['bar_colors'][gene]
-                            )
-                            
-                            col_bar_c, col_bar_r = st.columns([3, 1])
-                            
-                            with col_bar_c:
-                                new_color = st.color_picker( 
-                                    f"Bar: {condition}", current_bar_color, key=f"bar_color_{gene}_{condition}" 
-                                )
-                                # Save override color
-                                st.session_state.graph_settings['bar_colors_per_sample'][custom_key] = new_color
-                            
-                            with col_bar_r:
-                                st.markdown("<div style='padding-top: 25px;'>", unsafe_allow_html=True)
-                                # The reset button deletes from a nested dictionary, which is safe.
-                                if st.button("X", key=f"reset_{gene}_{condition}", help="Reset to gene default", use_container_width=True):
-                                    if custom_key in st.session_state.graph_settings['bar_colors_per_sample']:
-                                        del st.session_state.graph_settings['bar_colors_per_sample'][custom_key]
-                                    st.rerun() 
-
-                    st.caption("Bar Colors")
-
-
-                st.markdown("<hr style='border: 1px dashed #ced4da;'>", unsafe_allow_html=True)
-
-                # --- 2. Generate and Display Graph ---
+                st.session_state.graph_settings[show_err_key] = st.checkbox(
+                    "📏 Error Bars",
+                    st.session_state.graph_settings[show_err_key],
+                    key=f"chk_err_{gene}"
+                )
                 
-                # Merge global settings with gene-specific overrides for final plotting
-                final_settings = st.session_state.graph_settings.copy()
-                final_settings.update(gene_settings) # Override global settings with gene-specific settings
+                # === BAR SPACING ===
+                st.markdown("<h4>📏 Spacing</h4>", unsafe_allow_html=True)
+                bar_gap_key = f"{gene}_bar_gap"
+                if bar_gap_key not in st.session_state.graph_settings:
+                    st.session_state.graph_settings[bar_gap_key] = 0.25
+                
+                st.session_state.graph_settings[bar_gap_key] = st.slider(
+                    "Gap",
+                    0.0, 0.5,
+                    st.session_state.graph_settings[bar_gap_key],
+                    0.05,
+                    key=f"gap_{gene}",
+                    label_visibility="collapsed"
+                )
+                
+                # === BAR COLORS & INDIVIDUAL CONTROLS ===
+                st.markdown("<h4>🎨 Bar Settings</h4>", unsafe_allow_html=True)
                 
                 gene_data = st.session_state.processed_data[gene]
-                sample_order = st.session_state.get('sample_order')
                 
+                # Initialize per-bar settings storage
+                if f'{gene}_bar_settings' not in st.session_state:
+                    st.session_state[f'{gene}_bar_settings'] = {}
+                
+                # Initialize bar_colors_per_sample if not exists
+                if 'bar_colors_per_sample' not in st.session_state.graph_settings:
+                    st.session_state.graph_settings['bar_colors_per_sample'] = {}
+                
+                # Loop through each bar/condition - COMPACT VERSION
+                for idx, (_, row) in enumerate(gene_data.iterrows()):
+                    condition = row['Condition']
+                    group = row.get('Group', 'Treatment')
+                    
+                    # Determine default color based on group
+                    default_colors = {
+                        'Baseline': '#FFFFFF',
+                        'Non-treated': '#FFFFFF',
+                        'Control': '#FFFFFF',
+                        'Negative Control': '#9E9E9E',
+                        'Inducer': '#9E9E9E',
+                        'Positive Control': '#9E9E9E',
+                        'Treatment': '#D3D3D3'
+                    }
+                    default_color = default_colors.get(group, '#D3D3D3')
+                    
+                    # Unique key for this bar
+                    bar_key = f"{gene}_{condition}"
+                    
+                    # Initialize settings for this bar if not exists
+                    if bar_key not in st.session_state[f'{gene}_bar_settings']:
+                        st.session_state[f'{gene}_bar_settings'][bar_key] = {
+                            'color': default_color,
+                            'show_sig': True,
+                            'show_err': True
+                        }
+                    
+                    # Create COMPACT expandable section for each bar
+                    with st.expander(f"{condition[:20]}{'...' if len(condition) > 20 else ''}", expanded=False):
+                        
+                        # Compact layout - single column
+                        st.markdown(f"<p style='font-size: 10px; color: #666;'>{group}</p>", unsafe_allow_html=True)
+                        
+                        # COLOR PICKER - Compact
+                        new_color = st.color_picker(
+                            "Color",
+                            st.session_state[f'{gene}_bar_settings'][bar_key]['color'],
+                            key=f"color_{gene}_{condition}_{idx}"
+                        )
+                        st.session_state[f'{gene}_bar_settings'][bar_key]['color'] = new_color
+                        st.session_state.graph_settings['bar_colors_per_sample'][bar_key] = new_color
+                        
+                        # COMPACT TOGGLES
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            show_sig_bar = st.checkbox(
+                                "⭐",
+                                st.session_state[f'{gene}_bar_settings'][bar_key]['show_sig'],
+                                key=f"sig_{gene}_{condition}_{idx}",
+                                help="Show significance"
+                            )
+                            st.session_state[f'{gene}_bar_settings'][bar_key]['show_sig'] = show_sig_bar
+                        
+                        with col_b:
+                            show_err_bar = st.checkbox(
+                                "📏",
+                                st.session_state[f'{gene}_bar_settings'][bar_key]['show_err'],
+                                key=f"err_{gene}_{condition}_{idx}",
+                                help="Show error bar"
+                            )
+                            st.session_state[f'{gene}_bar_settings'][bar_key]['show_err'] = show_err_bar
+                        
+                        # COMPACT RESET BUTTON
+                        if st.button("↺", key=f"reset_{gene}_{condition}_{idx}", use_container_width=True, help="Reset"):
+                            st.session_state[f'{gene}_bar_settings'][bar_key] = {
+                                'color': default_color,
+                                'show_sig': True,
+                                'show_err': True
+                            }
+                            if bar_key in st.session_state.graph_settings.get('bar_colors_per_sample', {}):
+                                del st.session_state.graph_settings['bar_colors_per_sample'][bar_key]
+                            st.rerun()
+            
+            with col_graph:
+                st.markdown("<h3 style='margin-bottom: 15px;'>📊 Graph</h3>", unsafe_allow_html=True)
+                
+                # Get gene data
+                gene_data = st.session_state.processed_data[gene]
+                
+                # Apply gene-specific show/hide settings
+                show_sig_key = f"{gene}_show_sig"
+                show_err_key = f"{gene}_show_err"
+                
+                # Create copy of settings with gene-specific overrides
+                current_settings = st.session_state.graph_settings.copy()
+                current_settings['show_significance'] = current_settings.get(show_sig_key, True)
+                current_settings['show_error'] = current_settings.get(show_err_key, True)
+                
+                # Apply bar gap setting
+                bar_gap_key = f"{gene}_bar_gap"
+                if bar_gap_key in current_settings:
+                    current_settings['bar_gap'] = current_settings[bar_gap_key]
+                
+                # Generate the graph
                 fig = GraphGenerator.create_gene_graph(
                     gene_data,
                     gene,
-                    final_settings, # Pass the consolidated final settings
-                    efficacy_config,
-                    sample_order
+                    current_settings,
+                    EFFICACY_CONFIG.get(st.session_state.selected_efficacy, {}),
+                    sample_order=st.session_state.get('sample_order'),
+                    per_sample_overrides=None
                 )
                 
-                # Final touch: store the generated figure for export
-                st.session_state.graphs[gene] = fig
-                st.plotly_chart(fig, use_container_width=True)
+                # Display the graph
+                st.plotly_chart(fig, use_container_width=True, key=f"fig_{gene}")
                 
-                # --- Panel Footer (Close the container) ---
-                st.markdown("</div>", unsafe_allow_html=True)
-
+                # Store graph in session state for export
+                st.session_state.graphs[gene] = fig
     else:
-        st.warning("⚠️ Run the analysis in the 'Analysis' tab first.")
+        st.info("⏳ No analysis results yet. Go to 'Sample Mapping' tab and click 'Run Full Analysis Now'")
     
 # ==================== TAB 5: EXPORT ====================
 with tab5:
@@ -1559,10 +1686,12 @@ with tab5:
 
 # ==================== FOOTER ====================
 st.markdown("---")
-st.markdown("""
+
+footer_html = """
 <div style='text-align: center; color: #666;'>
     <p>🧬 qPCR Analysis Suite Pro v2.0 | Gene-by-gene analysis with efficacy-specific workflows</p>
     <p>Housekeeping normalization • Individual gene graphs • Comprehensive statistics</p>
 </div>
-""", unsafe_allow_html=True)
+"""
 
+st.markdown(footer_html, unsafe_allow_html=True)
