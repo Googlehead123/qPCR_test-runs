@@ -465,22 +465,27 @@ class GraphGenerator:
         if 'SEM' not in gene_data.columns:
             gene_data['SEM'] = 0
         
-        # ALWAYS use sample_order from mapping (converted to condition names)
+        # FIXED: Use sample_order from mapping and deduplicate conditions while preserving order
         if sample_order:
             # Convert sample names to condition names using mapping
             mapping = st.session_state.get('sample_mapping', {})
             condition_order = []
+            seen_conditions = set()  # Track which conditions we've already added
+            
             for sample in sample_order:
                 # Only include samples that are marked as 'include'
                 if mapping.get(sample, {}).get('include', True):
                     cond = mapping.get(sample, {}).get('condition', sample)
-                    if cond in gene_data['Condition'].unique():
+                    # Only add if this condition exists in the data AND we haven't added it yet
+                    if cond in gene_data['Condition'].unique() and cond not in seen_conditions:
                         condition_order.append(cond)
+                        seen_conditions.add(cond)
             
             # Add any conditions not in order (shouldn't happen, but safety)
             for cond in gene_data['Condition'].unique():
-                if cond not in condition_order:
+                if cond not in seen_conditions:
                     condition_order.append(cond)
+                    seen_conditions.add(cond)
             
             # Apply categorical ordering
             gene_data['Condition'] = pd.Categorical(
@@ -625,9 +630,9 @@ class GraphGenerator:
                 font=dict(size=settings.get(f"{gene}_ylabel_size", 14))
             ),
             showgrid=False,
-            zeroline=True,        # CHANGED: Show horizontal line at y=0
-            zerolinewidth=1,    # ADDED: Match y-axis line thickness
-            zerolinecolor='black', # ADDED: Black baseline
+            zeroline=True,
+            zerolinewidth=1,
+            zerolinecolor='black',
             range=[0, y_max_auto],
             fixedrange=False
         )
@@ -639,7 +644,7 @@ class GraphGenerator:
         # Manual range override if user specified
         if settings.get('y_min') is not None or settings.get('y_max') is not None:
             y_range = []
-            y_range.append(settings.get('y_min', 0))  # Always start at 0 or user-specified min
+            y_range.append(settings.get('y_min', 0))
             y_range.append(settings.get('y_max', y_max_auto))
             y_axis_config['range'] = y_range
         
@@ -684,7 +689,7 @@ class GraphGenerator:
                 ticktext=wrapped_labels,
                 tickfont=dict(size=gene_tick_size),
                 tickangle=0,
-                showline=False,       # CHANGED: Hide x-axis line
+                showline=False,
                 mirror=False,
                 side='bottom',
                 range=[-0.5, n_bars - 0.5]
@@ -707,7 +712,7 @@ class GraphGenerator:
         )
         
         return fig
-    
+
 # ==================== EXPORT FUNCTIONS ====================
 def export_to_excel(raw_data: pd.DataFrame, processed_data: Dict[str, pd.DataFrame], 
                    params: dict, mapping: dict) -> bytes:
