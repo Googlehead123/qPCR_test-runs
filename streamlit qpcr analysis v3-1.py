@@ -626,6 +626,11 @@ class GraphGenerator:
             showlegend=False
         ))
         
+        # Calculate y-axis range FIRST (needed for absolute positioning of significance)
+        max_y_value = gene_data_indexed['Relative_Expression'].max()
+        max_error = error_array.max() if len(error_array) > 0 else 0
+        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
+        
         # Add significance symbols - aligned with bars (DUAL SUPPORT with absolute positioning)
         for idx in range(n_bars):
             row = gene_data_indexed.iloc[idx]
@@ -661,26 +666,18 @@ class GraphGenerator:
                     symbols_to_show.append(sig_2)
                     font_sizes.append(hashtag_font_size)
                 
-                # Display symbols with ABSOLUTE positioning (paper coordinates)
+                # Display symbols with ABSOLUTE positioning
                 if len(symbols_to_show) >= 1:
-                    # Convert data y-position to paper coordinates for absolute positioning
-                    # First, we need to place them relative to the bar, then use fixed spacing
-                    
-                    # For single or dual symbols, use consistent absolute spacing
-                    # Start position: just above error bar
-                    y_start = base_y_position
-                    
                     # Fixed absolute spacing in data units
                     # Calculate spacing as percentage of y-axis range for consistency
-                    y_axis_range = y_max_auto if 'y_max_auto' in locals() else max_y_value * 1.3
-                    absolute_spacing = y_axis_range * 0.035  # 3.5% of y-axis range
+                    absolute_spacing = y_max_auto * 0.035  # 3.5% of y-axis range
                     
                     if len(symbols_to_show) == 2:
                         # Two symbols: stack with fixed spacing
                         # Bottom symbol (asterisk)
                         fig.add_annotation(
                             x=idx,
-                            y=y_start + (absolute_spacing * 0.3),  # Small offset from error bar
+                            y=base_y_position + (absolute_spacing * 0.3),  # Small offset from error bar
                             text=symbols_to_show[0],
                             showarrow=False,
                             font=dict(size=font_sizes[0], color='black', family='Arial'),
@@ -693,7 +690,7 @@ class GraphGenerator:
                         # Top symbol (hashtag) - fixed absolute distance above asterisk
                         fig.add_annotation(
                             x=idx,
-                            y=y_start + absolute_spacing,  # Fixed spacing from error bar
+                            y=base_y_position + absolute_spacing,  # Fixed spacing from error bar
                             text=symbols_to_show[1],
                             showarrow=False,
                             font=dict(size=font_sizes[1], color='black', family='Arial'),
@@ -707,7 +704,7 @@ class GraphGenerator:
                         # Single symbol - positioned just above error bar
                         fig.add_annotation(
                             x=idx,
-                            y=y_start + (absolute_spacing * 0.3),
+                            y=base_y_position + (absolute_spacing * 0.3),
                             text=symbols_to_show[0],
                             showarrow=False,
                             font=dict(size=font_sizes[0], color='black', family='Arial'),
@@ -720,12 +717,7 @@ class GraphGenerator:
         # Custom y-axis label with bold red gene name
         y_label_html = f"Relative <b style='color:red;'>{gene}</b> Expression Level"
         
-        # Calculate max value for y-axis range
-        max_y_value = gene_data_indexed['Relative_Expression'].max()
-        max_error = error_array.max() if len(error_array) > 0 else 0
-        y_max_auto = max_y_value + max_error + (max_y_value * 0.15)  # Add 15% padding for stars
-        
-        # Y-axis configuration
+        # Y-axis configuration (y_max_auto already calculated above)
         y_axis_config = dict(
             title=dict(
                 text=y_label_html,
